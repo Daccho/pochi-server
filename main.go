@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,7 @@ type ChatRequestWear struct {
 // Common Response
 type ChatResponse struct {
 	Response string `json:"response"`
+	Audio    string `json:"audio,omitempty"` // Base64 encoded WAV
 }
 
 // --- Logic ---
@@ -64,10 +67,44 @@ func loadContext() string {
 	return context.String()
 }
 
+// VOICEVOX: Text to Audio
+func generateVoice(text string) (string, error) {
+	voicevoxURL := os.Getenv("VOICEVOX_URL")
+	if voicevoxURL == "" {
+		return "", nil // Voicevox not configured
+	}
+
+	speaker := "3" // ずんだもん（ノーマル）
+
+	// 1. Audio Query
+	queryURL := fmt.Sprintf("%s/audio_query?speaker=%s&text=%s", voicevoxURL, speaker, url.QueryEscape(text))
+	resp, err := http.Post(queryURL, "application/json", nil)
+	if err != nil {
+		return "", fmt.Errorf("audio_query failed: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	queryData, _ := ioutil.ReadAll(resp.Body)
+
+	// 2. Synthesis
+	synthURL := fmt.Sprintf("%s/synthesis?speaker=%s", voicevoxURL, speaker)
+	respSynth, err := http.Post(synthURL, "application/json", bytes.NewBuffer(queryData))
+	if err != nil {
+		return "", fmt.Errorf("synthesis failed: %v", err)
+	}
+	defer respSynth.Body.Close()
+
+	audioData, _ := ioutil.ReadAll(respSynth.Body)
+	
+	// Return Base64
+	return base64.StdEncoding.EncodeToString(audioData), nil
+}
+
 func callClaude(apiKey string, messages []Message) (string, error) {
 	url := "https://api.anthropic.com/v1/messages"
 	
-	systemPrompt := "You are Pochi (ぽち) 🧸. Your personality context is loaded below. Keep responses warm, helpful, and concise." + loadContext()
+	// 30文字制限を追加！
+	systemPrompt := "You are Pochi (ぽち) 🧸. Your personality context is loaded below. Keep responses warm, helpful, and VERY concise (under 30 Japanese characters)." + loadContext()
 
 	// Build Anthropic messages
 	anthropicMessages := []map[string]string{}
@@ -174,8 +211,17 @@ func handleChat(w http.ResponseWriter, apiKey string, messages []Message) {
 		return
 	}
 
+	// Generate Voice (Zundamon)
+	audioBase64, err := generateVoice(response)
+	if err != nil {
+		log.Printf("Voice generation failed (skipping): %v", err)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ChatResponse{Response: response})
+	json.NewEncoder(w).Encode(ChatResponse{
+		Response: response,
+		Audio:    audioBase64,
+	})
 }
 
 func setupCORS(w http.ResponseWriter, r *http.Request) {
@@ -201,7 +247,7 @@ func main() {
 	// Health Check (for Cloud Run)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("🧸 Pochi Server is running!"))
+		w.Write([]byte("🧸 Pochi Server (with Voicevox) is running!"))
 	})
 
 	port := os.Getenv("PORT")
@@ -210,5 +256,6 @@ func main() {
 	}
 
 	log.Printf("🧸 Pochi Server running on port %s", port)
+	log.Printf("🎤 Voicevox URL configured: %s", os.Getenv("VOICEVOX_URL"))
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
