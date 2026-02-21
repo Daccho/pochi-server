@@ -1,0 +1,14 @@
+services:
+  pochi-server:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - PORT=8080
+    volumes:
+      # ローカルでの開発時にコンテキストファイルを即座に反映させたい場合はコメントアウトを外す
+      # - ./context:/app/context
+      - ./server.log:/root/server.log
+    restart: always
